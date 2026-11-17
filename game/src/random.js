@@ -10,3 +10,18 @@ export function createRandom(seed) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
+
+/** An integer in [min, max] inclusive, from the given random(). */
+export function randInt(random, min, max) {
+  return min + Math.floor(random() * (max - min + 1));
+}
+
+/** A float in [min, max). */
+export function randRange(random, min, max) {
+  return min + random() * (max - min);
+}
+
+/** Pick one element of an array at random. */
+export function pick(random, list) {
+  return list[Math.floor(random() * list.length)];
+}

@@ -1,53 +1,81 @@
-// Keyboard and pointer input. Held keys give a steering direction; one-shot presses (start or
-// restart, pause) are queued as bit flags and taken once by the loop, so a press between two
-// frames is never lost and never counted twice.
+// Keyboard and mouse. Held keys give the movement direction; one-shot presses (interact, pause,
+// punch) are queued and taken once by the loop so a press between two frames is never lost.
 
-export const ACTION_CONFIRM = 1;
-export const ACTION_PAUSE = 2;
-
-const LEFT = new Set(['ArrowLeft', 'KeyA']);
-const RIGHT = new Set(['ArrowRight', 'KeyD']);
-const CONFIRM = new Set(['Space', 'Enter']);
-const PAUSE = new Set(['KeyP', 'Escape']);
+export const KEY_UP = new Set(['ArrowUp', 'KeyW']);
+export const KEY_DOWN = new Set(['ArrowDown', 'KeyS']);
+export const KEY_LEFT = new Set(['ArrowLeft', 'KeyA']);
+export const KEY_RIGHT = new Set(['ArrowRight', 'KeyD']);
+export const KEY_INTERACT = new Set(['KeyE', 'KeyF', 'Enter']);
+export const KEY_PAUSE = new Set(['KeyP', 'Escape']);
+export const KEY_PUNCH = new Set(['Space', 'KeyJ', 'KeyZ']);
 
 export function createInput(target) {
-  let left = false;
-  let right = false;
-  let actions = 0;
+  const keys = new Set();
+  const pressed = new Set();
+  const mouse = { x: 0, y: 0, down: false, pressed: false };
 
   window.addEventListener('keydown', (event) => {
-    if (LEFT.has(event.code)) left = true;
-    else if (RIGHT.has(event.code)) right = true;
-    else if (CONFIRM.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_CONFIRM;
-    } else if (PAUSE.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_PAUSE;
-    } else return;
-    event.preventDefault();
+    keys.add(event.code);
+    if (!event.repeat) pressed.add(event.code);
+    if (
+      KEY_UP.has(event.code) || KEY_DOWN.has(event.code) || KEY_LEFT.has(event.code) ||
+      KEY_RIGHT.has(event.code) || KEY_INTERACT.has(event.code) || KEY_PAUSE.has(event.code) ||
+      KEY_PUNCH.has(event.code)
+    ) {
+      event.preventDefault();
+    }
   });
   window.addEventListener('keyup', (event) => {
-    if (LEFT.has(event.code)) left = false;
-    else if (RIGHT.has(event.code)) right = false;
+    keys.delete(event.code);
   });
-  // A key released while the tab is hidden never sends keyup: let go of everything on blur.
   window.addEventListener('blur', () => {
-    left = false;
-    right = false;
-  });
-  target.addEventListener('pointerdown', () => {
-    actions |= ACTION_CONFIRM;
+    keys.clear();
   });
 
-  return {
-    /** -1 for left, 1 for right, 0 for neither or both. */
-    direction() {
-      return (right ? 1 : 0) - (left ? 1 : 0);
-    },
-    /** The one-shot presses since the last call, as ACTION_* flags. */
-    takeActions() {
-      const taken = actions;
-      actions = 0;
-      return taken;
-    },
-  };
+  target.addEventListener('pointermove', (event) => {
+    const rect = target.getBoundingClientRect();
+    mouse.x = event.clientX - rect.left;
+    mouse.y = event.clientY - rect.top;
+  });
+  target.addEventListener('pointerdown', (event) => {
+    mouse.down = true;
+    mouse.pressed = true;
+    mouse.x = event.clientX - target.getBoundingClientRect().left;
+    mouse.y = event.clientY - target.getBoundingClientRect().top;
+  });
+  window.addEventListener('pointerup', () => {
+    mouse.down = false;
+  });
+
+  /** -1, 0 or 1 on each axis, from the held movement keys. */
+  function axis() {
+    const x = (keys.has('ArrowRight') || keys.has('KeyD') ? 1 : 0) - (keys.has('ArrowLeft') || keys.has('KeyA') ? 1 : 0);
+    const y = (keys.has('ArrowDown') || keys.has('KeyS') ? 1 : 0) - (keys.has('ArrowUp') || keys.has('KeyW') ? 1 : 0);
+    return { x, y };
+  }
+
+  function held(code) {
+    return keys.has(code);
+  }
+
+  function anyHeld(set) {
+    for (const code of set) if (keys.has(code)) return true;
+    return false;
+  }
+
+  /** The one-shot presses since the last call, then clears them. */
+  function takePressed() {
+    const taken = [...pressed];
+    pressed.clear();
+    return taken;
+  }
+
+  /** One-shot mouse press, taken once. */
+  function takeMousePressed() {
+    const was = mouse.pressed;
+    mouse.pressed = false;
+    return was;
+  }
+
+  return { axis, held, anyHeld, takePressed, takeMousePressed, mouse, keys };
 }
