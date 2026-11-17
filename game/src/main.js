@@ -1,29 +1,17 @@
-// Boot and the one loop: input is read every frame, the world advances in fixed 1/60 s steps, and
-// the renderer paints what is there. Screens: title, play and paused. ?shot=chase|drive|foot|mission
-// (with &seed=N) stages that scene instead, runs it forward, paints it and sets window.__shotReady.
-
-import { STEP, MONEY_START, ZOOM, HEALTH } from './config.js';
+// Boot and the one loop: input is read every frame, the world advances in fixed 1/60 s steps
+// (several in a slow frame, none in a fast one), and the renderer paints what is there. The game
+// moves between four screens: title, play, paused and game over.
+//
+// ?seed=N fixes the falling pattern. ?shot=start|play|end (with &seed=N) stages that scene
+// instead of running the loop, paints it twice and sets window.__shotReady for a screenshot.
+import { BEST_KEY, LIVES, STEP } from './config.js';
 import { createRandom } from './random.js';
-import { createInput } from './input.js';
-import { loadAssets } from './assets.js';
-import { createCity } from './city.js';
-import { createCamera } from './camera.js';
-import { createPlayer, stepPlayerFoot, playerFacingVector } from './player.js';
-import { stepDriving, enterCar, exitCar, findNearbyCar } from './driving.js';
-import { spawnTraffic, stepTraffic } from './traffic.js';
-import { spawnPedestrians, stepPedestrians } from './pedestrians.js';
-import { stepPolice } from './police.js';
-import { createWanted, reportCrime, stepWanted } from './wanted.js';
-import { createMission, placeMissionMarker, stepMissions } from './missions.js';
-import { stepCombat } from './combat.js';
-import { createAudio } from './audio.js';
-import { saveGame, loadGame } from './save.js';
+import { createWorld, EVENT_HIT, EVENT_OVER } from './world.js';
+import { ACTION_CONFIRM, ACTION_PAUSE, createInput } from './input.js';
+import { createRenderer, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
 import { stageShot } from './shots.js';
-import { createRenderer, SCREEN_TITLE, SCREEN_PLAY, SCREEN_PAUSED } from './render.js';
-import { KEY_INTERACT, KEY_PAUSE } from './input.js';
-import { createVehicle } from './vehicles.js';
-import { DIR } from './sprites.js';
 
+/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed. */
 const MAX_FRAME = 0.25;
 
 const params = new URLSearchParams(window.location.search);
@@ -33,190 +21,104 @@ const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() 
 
 const canvas = document.getElementById('game');
 const status = document.getElementById('status');
+const world = createWorld(createRandom(seed));
+const renderer = createRenderer(canvas);
 
-function createGame(random, input) {
-  const city = createCity(random);
-  const camera = createCamera();
-  const player = createPlayer(city.vRoads[5] + 40, city.hRails[5], DIR.RIGHT);
-  const game = {
-    random, city, camera, input, player,
-    vehicles: [],
-    peds: [],
-    wanted: createWanted(),
-    money: MONEY_START,
-    mission: createMission(random),
-    audio: createAudio(),
-    time: 0,
-    playerCar: null,
-    shotControls: null,
-    loaded: false,
-    crimeCooldown: 0,
-  };
-  game.reportCrime = (stars) => reportCrime(game, stars);
-
-  // The player's own car, parked at the kerb beside them.
-  const car = createVehicle('civilian', city.vRoads[5] - 40, city.hRails[5], 0);
-  game.vehicles.push(car);
-  game.playerCar = car;
-
-  game.vehicles.push(...spawnTraffic(game));
-  game.peds.push(...spawnPedestrians(game));
-  for (const s of city.parkedSpots) game.vehicles.push(createVehicle('civilian', s.x, s.y, s.heading));
-  for (const s of city.curbSpots) game.vehicles.push(createVehicle('civilian', s.x, s.y, s.heading));
-
-  placeMissionMarker(game);
-  return game;
-}
-
-function cameraTarget(game) {
-  const p = game.player;
-  if (p.mode === 'car' && p.car) {
-    return { pos: p.car, look: { x: Math.cos(p.car.heading), y: Math.sin(p.car.heading) }, zoom: ZOOM.car };
+function readBest() {
+  try {
+    return Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0;
+  } catch {
+    return 0;
   }
-  return { pos: p, look: playerFacingVector(p), zoom: ZOOM.foot };
 }
 
-function step(game, dt) {
-  game.time += dt;
-  if (game.crimeCooldown > 0) game.crimeCooldown -= dt;
-
-  const p = game.player;
-  const speedBefore = p.car ? p.car.speed : 0;
-  if (p.mode === 'car' && p.car) stepDriving(game, dt, game.shotControls);
-  else stepPlayerFoot(p, game.input.axis(), dt, game.city);
-
-  stepTraffic(game, dt);
-  stepPedestrians(game, dt);
-  stepPolice(game, dt);
-  stepWanted(game, dt);
-  stepMissions(game, dt);
-  if (p.mode === 'foot') stepCombat(game, dt);
-
-  // Driving over a pedestrian is a crime, and ramming a police car keeps the heat up and hurts.
-  if (p.mode === 'car' && p.car) {
-    const car = p.car;
-    if (speedBefore > 80 && Math.abs(car.speed) < 5) {
-      p.health = Math.max(0, p.health - HEALTH.hitBuilding);
-    }
-    for (const ped of game.peds) {
-      if (ped.scatter > 0) continue;
-      if (Math.hypot(ped.x - car.x, ped.y - car.y) < car.length / 2 + 8) {
-        const d = Math.hypot(ped.x - car.x, ped.y - car.y) || 1;
-        ped.scatter = 1.2;
-        ped.fleeX = (ped.x - car.x) / d;
-        ped.fleeY = (ped.y - car.y) / d;
-        game.reportCrime(1);
-      }
-    }
-    for (const v of game.vehicles) {
-      if (v.driver !== 'police') continue;
-      if (game.crimeCooldown <= 0 && Math.hypot(v.x - car.x, v.y - car.y) < car.length) {
-        game.reportCrime(1);
-        game.crimeCooldown = 2;
-        p.health = Math.max(0, p.health - HEALTH.rammed);
-      }
-    }
+function saveBest(value) {
+  try {
+    window.localStorage.setItem(BEST_KEY, String(value));
+  } catch {
+    // Storage can be off (private windows): the best score then lasts this visit only.
   }
-  p.health = Math.min(HEALTH.max, p.health + HEALTH.regen * dt);
-
-  const cam = cameraTarget(game);
-  game.camera.setZoom(cam.zoom);
-  game.camera.update(cam.pos, cam.look, dt, game.city.worldWidth, game.city.worldHeight);
 }
 
-function announce(message) {
-  status.textContent = message;
-}
-
-function runShot(renderer, game, name) {
-  const steps = stageShot(game, name);
-  const cam = cameraTarget(game);
-  game.camera.setZoom(cam.zoom);
-  game.camera.snapTo(cam.pos, game.city.worldWidth, game.city.worldHeight);
-  for (let i = 0; i < steps; i += 1) step(game, STEP);
+function runShot(name) {
+  const scene = stageShot(name, world);
   let painted = 0;
   function paint() {
-    renderer.draw(game, SCREEN_PLAY);
+    renderer.draw(world.state, scene.screen, scene.best);
     painted += 1;
-    if (painted < 3) requestAnimationFrame(paint);
+    if (painted < 2) requestAnimationFrame(paint);
     else window.__shotReady = true;
   }
   requestAnimationFrame(paint);
 }
 
-function runGame(renderer, game, input) {
+function runGame() {
+  const input = createInput(canvas);
   let screen = SCREEN_TITLE;
+  let best = readBest();
   let accumulator = 0;
   let last = performance.now();
-  let saveTimer = 0;
 
-  game.loaded = loadGame(game);
-  if (game.loaded) announce('Saved game loaded.');
-
-  function startGame() {
-    game.audio.start();
-    screen = SCREEN_PLAY;
-    announce('Playing. WASD to move, E to enter a car.');
+  // Screen readers (and anyone watching the page's text) hear the screen changes and each hit.
+  function announce(message) {
+    status.textContent = message;
   }
 
-  function handleInput() {
-    const pressed = input.takePressed();
+  function startGame() {
+    world.reset();
+    accumulator = 0;
+    screen = SCREEN_PLAY;
+    announce(`Playing. ${LIVES} lives.`);
+  }
+
+  function endGame() {
+    screen = SCREEN_OVER;
+    if (world.state.score > best) {
+      best = world.state.score;
+      saveBest(best);
+    }
+    announce(`Game over. Score ${world.state.score}. Best ${best}.`);
+  }
+
+  function handleActions() {
+    const actions = input.takeActions();
+    if (actions & ACTION_CONFIRM && (screen === SCREEN_TITLE || screen === SCREEN_OVER)) startGame();
+    else if (actions & ACTION_PAUSE && screen === SCREEN_PLAY) {
+      screen = SCREEN_PAUSED;
+      announce('Paused.');
+    } else if (actions & (ACTION_PAUSE | ACTION_CONFIRM) && screen === SCREEN_PAUSED) {
+      screen = SCREEN_PLAY;
+      announce('Playing.');
+    }
+  }
+
+  function step() {
     if (screen === SCREEN_TITLE) {
-      if (pressed.length > 0 || input.takeMousePressed()) startGame();
+      world.step(STEP, 0, true);
       return;
     }
-    if (screen === SCREEN_PAUSED) {
-      if (pressed.some((c) => KEY_PAUSE.has(c) || KEY_INTERACT.has(c))) {
-        screen = SCREEN_PLAY;
-        announce('Playing.');
-      }
-      return;
-    }
-    for (const code of pressed) {
-      if (KEY_PAUSE.has(code)) {
-        screen = SCREEN_PAUSED;
-        announce('Paused.');
-        break;
-      } else if (KEY_INTERACT.has(code)) {
-        if (game.player.mode === 'car') exitCar(game);
-        else {
-          const car = findNearbyCar(game);
-          if (car) {
-            enterCar(game, car);
-            game.audio.start();
-            announce(car.kind === 'police' ? 'Stole a police car!' : 'Got in the car.');
-          }
-        }
-        break;
-      }
-    }
+    const events = world.step(STEP, input.direction(), false);
+    if (events & EVENT_OVER) endGame();
+    else if (events & EVENT_HIT) announce(world.state.lives === 1 ? 'Hit. 1 life left.' : `Hit. ${world.state.lives} lives left.`);
   }
 
   function frame(now) {
     requestAnimationFrame(frame);
-    const dt = Math.min((now - last) / 1000, MAX_FRAME);
+    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
     last = now;
-    handleInput();
-    if (screen !== SCREEN_PAUSED) {
-      accumulator += dt;
-      while (accumulator >= STEP) {
-        step(game, STEP);
+    handleActions();
+    if (screen === SCREEN_TITLE || screen === SCREEN_PLAY) {
+      while (accumulator >= STEP && (screen === SCREEN_TITLE || screen === SCREEN_PLAY)) {
+        step();
         accumulator -= STEP;
-      }
-      if (screen === SCREEN_PLAY) {
-        saveTimer += dt;
-        if (saveTimer >= 4) {
-          saveTimer = 0;
-          saveGame(game);
-        }
       }
     } else {
       accumulator = 0;
     }
-    game.audio.setMode(game.wanted.stars > 0 ? 'chase' : 'city');
-    renderer.draw(game, screen);
+    renderer.draw(world.state, screen, best);
   }
 
+  // Leaving the tab pauses a running game rather than letting blocks fall unseen.
   document.addEventListener('visibilitychange', () => {
     if (document.hidden && screen === SCREEN_PLAY) {
       screen = SCREEN_PAUSED;
@@ -224,15 +126,9 @@ function runGame(renderer, game, input) {
     }
   });
 
-  announce('Sunset City. Press any key or click to start.');
+  announce('Block Dodger. Press Space or click to start.');
   requestAnimationFrame(frame);
 }
 
-loadAssets().then(({ images }) => {
-  const random = createRandom(seed);
-  const input = createInput(canvas);
-  const game = createGame(random, input);
-  const renderer = createRenderer(canvas, images);
-  if (shot) runShot(renderer, game, shot);
-  else runGame(renderer, game, input);
-});
+if (shot) runShot(shot);
+else runGame();
