@@ -1,141 +1,24 @@
-// Drawing only: the world's state and the current screen in, pixels out. The 1280x720 playfield
-// is scaled to fit the window and centred, the margin filled with the backdrop colour. Flat
-// rectangles and circles, canvas text for the HUD and the panels. Text that holds a number is
-// rebuilt only when the number changes, so a frame allocates nothing.
-import { FIELD, FONT, LIVES, PALETTE } from './config.js';
-import { KIND_COIN } from './world.js';
-
-export const SCREEN_TITLE = 'title';
-export const SCREEN_PLAY = 'play';
-export const SCREEN_PAUSED = 'paused';
-export const SCREEN_OVER = 'over';
-
-/** The panel's width; its height grows with its lines: room for the title, the lines and the prompt. */
-const PANEL = { width: 600, top: 134, line: 34, bottom: 70 };
-const LIFE_SIZE = 20;
-const LIFE_GAP = 8;
-
-function cachedLabel(prefix) {
-  let value = -1;
-  let text = '';
-  return function label(next) {
-    if (next !== value) {
-      value = next;
-      text = prefix + next;
-    }
-    return text;
-  };
-}
-
-export function createRenderer(canvas) {
-  const context = canvas.getContext('2d');
-  const view = { scale: 1, x: 0, y: 0 };
-  const scoreLabel = cachedLabel('Score ');
-  const levelLabel = cachedLabel('Level ');
-  const finalLabel = cachedLabel('Score ');
-  const bestLabel = cachedLabel('Best ');
-
-  function resize() {
-    const ratio = window.devicePixelRatio || 1;
-    const width = Math.round(window.innerWidth * ratio);
-    const height = Math.round(window.innerHeight * ratio);
-    canvas.width = width;
-    canvas.height = height;
-    view.scale = Math.min(width / FIELD.width, height / FIELD.height);
-    view.x = (width - FIELD.width * view.scale) / 2;
-    view.y = (height - FIELD.height * view.scale) / 2;
-  }
-
-  const fonts = new Map();
-  function text(value, x, y, size, color, align) {
-    if (!fonts.has(size)) fonts.set(size, `${size}px ${FONT}`);
-    context.font = fonts.get(size);
-    context.fillStyle = color;
-    context.textAlign = align;
-    context.fillText(value, x, y);
-  }
-
-  function drawField(state) {
-    context.fillStyle = PALETTE.sky;
-    context.fillRect(0, 0, FIELD.width, FIELD.height);
-    context.fillStyle = PALETTE.ground;
-    context.fillRect(0, FIELD.groundY, FIELD.width, FIELD.height - FIELD.groundY);
-
-    const items = state.items;
-    for (let index = 0; index < items.length; index += 1) {
-      const item = items[index];
-      if (!item.active) continue;
-      if (item.kind === KIND_COIN) {
-        context.fillStyle = PALETTE.coin;
-        context.beginPath();
-        context.arc(item.x + item.width / 2, item.y + item.height / 2, item.width / 2, 0, Math.PI * 2);
-        context.fill();
-      } else {
-        context.fillStyle = PALETTE.block;
-        context.fillRect(item.x, item.y, item.width, item.height);
-      }
-    }
-
-    const player = state.player;
-    // Blink while invulnerable after a hit: hidden on every other tenth of a second.
-    if (player.invulnerable === 0 || Math.floor(player.invulnerable * 10) % 2 === 1) {
-      context.fillStyle = PALETTE.player;
-      context.fillRect(player.x, player.y, player.width, player.height);
-    }
-  }
-
-  function drawHud(state) {
-    context.textBaseline = 'top';
-    text(scoreLabel(state.score), 24, 20, 28, PALETTE.text, 'left');
-    text(levelLabel(state.level), FIELD.width / 2, 20, 28, PALETTE.text, 'center');
-    const firstLife = FIELD.width - 24 - LIVES * (LIFE_SIZE + LIFE_GAP) + LIFE_GAP;
-    text('Lives', firstLife - 12, 20, 28, PALETTE.text, 'right');
-    for (let life = 0; life < LIVES; life += 1) {
-      context.fillStyle = life < state.lives ? PALETTE.player : PALETTE.ground;
-      context.fillRect(firstLife + life * (LIFE_SIZE + LIFE_GAP), 24, LIFE_SIZE, LIFE_SIZE);
-    }
-  }
-
-  function drawPanel(title, lines, prompt) {
-    const height = PANEL.top + lines.length * PANEL.line + PANEL.bottom;
-    const x = (FIELD.width - PANEL.width) / 2;
-    const y = (FIELD.height - height) / 2;
-    context.fillStyle = PALETTE.panel;
-    context.fillRect(x, y, PANEL.width, height);
-    context.textBaseline = 'alphabetic';
-    text(title, FIELD.width / 2, y + 78, 48, PALETTE.text, 'center');
-    for (let index = 0; index < lines.length; index += 1) {
-      text(lines[index], FIELD.width / 2, y + PANEL.top + index * PANEL.line, 22, PALETTE.muted, 'center');
-    }
-    text(prompt, FIELD.width / 2, y + height - 40, 24, PALETTE.coin, 'center');
-  }
-
-  const TITLE_LINES = ['Dodge the red blocks. Catch the gold coins.', 'Move with ← → or A D.  Pause with P.', ''];
-  const PAUSED_LINES = ['The blocks will wait for you.'];
-  const OVER_LINES = ['', ''];
-
-  /** Paint one frame: the field, then the HUD or a panel for the screen the game is on. */
-  function draw(state, screen, best) {
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.fillStyle = PALETTE.backdrop;
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    context.setTransform(view.scale, 0, 0, view.scale, view.x, view.y);
-    drawField(state);
-    if (screen === SCREEN_TITLE) {
-      TITLE_LINES[2] = bestLabel(best);
-      drawPanel('Block Dodger', TITLE_LINES, 'Press Space or click to start');
-      return;
-    }
-    drawHud(state);
-    if (screen === SCREEN_PAUSED) drawPanel('Paused', PAUSED_LINES, 'Press P to resume');
-    else if (screen === SCREEN_OVER) {
-      OVER_LINES[0] = finalLabel(state.score);
-      OVER_LINES[1] = bestLabel(best);
-      drawPanel('Game over', OVER_LINES, 'Press Space or click to play again');
-    }
-  }
-
-  resize();
-  window.addEventListener('resize', resize);
-  return { draw };
+import {STEP,ROAD,WORLD} from './config.js';
+import {visible} from './camera.js';
+import {drawCar,drawPerson,shadow} from './sprites.js';
+import {missionTarget} from './missions.js';
+import {drawHUD,drawMenu} from './hud.js';
+export function createRenderer(canvas,assets){const c=canvas.getContext('2d');const road=c.createPattern(assets.road,'repeat'),pavement=c.createPattern(assets.pavement,'repeat');
+ function tree(x,y,r){shadow(c,x,y,r,r*.6);c.fillStyle='#294e40';c.beginPath();c.arc(x,y,r,0,7);c.fill();c.fillStyle='#3f6d4b';c.beginPath();c.arc(x-5,y-6,r*.78,0,7);c.fill();c.fillStyle='#63814f';c.beginPath();c.arc(x-9,y-10,r*.4,0,7);c.fill();}
+ return s=>{c.clearRect(0,0,1280,720);c.save();c.translate(-s.camera.x,-s.camera.y);c.fillStyle=pavement;c.fillRect(0,0,WORLD,WORLD);
+ // The texture carries the asphalt grain; painted lane dashes establish travel directions.
+ c.fillStyle=road;for(let i=0;i<=8;i++){c.fillRect(i*STEP-95,0,190,WORLD);c.fillRect(0,i*STEP-95,WORLD,190);}
+ c.fillStyle='#23333777';for(let i=0;i<=8;i++){c.fillRect(i*STEP-95,0,190,WORLD);c.fillRect(0,i*STEP-95,WORLD,190);}
+ for(let y=0;y<=8;y++)for(let x=0;x<=8;x++){const xx=x*STEP,yy=y*STEP;if(!visible(s,{x:xx,y:yy},200))continue;c.fillStyle='#424c4b';c.fillRect(xx-94,yy-94,188,188);c.fillStyle='#e3ddc4b0';for(let n=-75;n<80;n+=25){c.fillRect(xx+n,yy-119,13,23);c.fillRect(xx+n,yy+96,13,23);c.fillRect(xx-119,yy+n,23,13);c.fillRect(xx+96,yy+n,23,13);}c.fillStyle='#e3b875';for(const a of [-1,1]){c.fillRect(xx+a*108-4,yy-128,8,22);c.fillStyle='#1d3437';c.fillRect(xx+a*108-5,yy-126,10,14);c.fillStyle='#78c5a0';c.fillRect(xx+a*108-2,yy-124,4,4);}}
+ for(const b of s.city.blocks){if(!visible(s,{x:b.x+b.w/2,y:b.y+b.h/2},300))continue;if(b.kind==='park'){c.fillStyle='#53734c';c.fillRect(b.x,b.y,b.w,b.h);c.fillStyle='#c1b89a';c.fillRect(b.x+b.w/2-16,b.y,32,b.h);c.fillRect(b.x,b.y+b.h/2-15,b.w,30);c.fillStyle='#6f9690';c.beginPath();c.ellipse(b.x+b.w*.73,b.y+b.h*.7,54,38,0,0,7);c.fill();for(const t of b.trees)tree(t.x,t.y,t.r);}if(b.kind==='parking'){c.fillStyle='#53605e';c.fillRect(b.x,b.y,b.w,b.h);c.strokeStyle='#d6d0af';c.lineWidth=2;for(let i=0;i<6;i++){c.strokeRect(b.x+12+i*52,b.y+15,48,100);c.strokeRect(b.x+12+i*52,b.y+b.h-115,48,100);}c.font='bold 36px Arial';c.fillStyle='#c6d3c1';c.fillText('P',b.x+b.w/2-12,b.y+b.h/2+12);}}
+  for(const b of s.city.buildings){if(!visible(s,{x:b.x+b.w/2,y:b.y+b.h/2},350))continue;c.fillStyle='#101f285c';c.fillRect(b.x+15,b.y+20,b.w+12,b.h+12);c.fillStyle='#344b52';c.fillRect(b.x,b.y,b.w,b.h);c.fillStyle=b.color;c.fillRect(b.x-6,b.y-8,b.w,b.h);c.fillStyle='#243b43';for(let i=0;i<3;i++){c.fillRect(b.x+24+i*44,b.y+28,28,38);c.fillStyle='#91b5b2';c.fillRect(b.x+27+i*44,b.y+31,22,29);c.fillStyle='#243b43';}c.fillStyle='#35494b';c.fillRect(b.x+b.w-76,b.y+b.h-81,52,50);c.font='bold 13px Arial';c.fillStyle='#d7ded1';c.fillText(b.label,b.x+22,b.y+b.h-28);c.fillStyle='#bf8f5b';c.fillRect(b.x+20,b.y+b.h-5,80,12);}
+ // Street furniture adds useful scale without obscuring the pavement walkers.
+ for(let row=0;row<8;row++)for(let col=0;col<8;col++){const x=col*STEP+285,y=row*STEP+139;if(!visible(s,{x,y},160))continue;c.fillStyle='#445c57';c.fillRect(x,y-9,55,12);c.fillStyle='#b8a57c';for(let n=0;n<3;n++)c.fillRect(x,y-9+n*4,55,2);c.fillStyle='#244a4b';c.fillRect(x+95,y-24,19,28);c.fillStyle='#a6d8d0';c.fillRect(x+99,y-21,11,14);}
+ c.fillStyle='#c6d3cb88';c.font='bold 13px Arial';for(let row=1;row<8;row++){c.fillText(['','CALDER STREET','ASTER BOULEVARD','MERCURY AVENUE','PORT ROAD'][row%4]||'WESTERN AVENUE',s.camera.x+570,row*STEP-72);}
+ const target=missionTarget(s);if(visible(s,target,100)){const pulse=1+Math.sin(s.time*3)*.08;c.save();c.translate(target.x,target.y);c.shadowColor='#ffc653';c.shadowBlur=28;c.strokeStyle='#ffdb80';c.lineWidth=4;c.beginPath();c.ellipse(0,0,49*pulse,28*pulse,0,0,7);c.stroke();c.fillStyle='#ffcd5b2a';c.fill();c.translate(0,-57);c.rotate(Math.PI/4);c.fillStyle='#ffcf66';c.fillRect(-13,-13,26,26);c.restore();}
+ const entities=[...s.cars.filter(p=>visible(s,p)),...s.people.filter(p=>visible(s,p,30))];if(!s.player.car)entities.push({...s.player,player:true});entities.sort((a,b)=>a.y-b.y);for(const p of entities){if(p.length)drawCar(c,assets,p,s.time);else drawPerson(c,assets,p,p.player);}
+ if(s.punch>0){c.strokeStyle='#ffe7a9';c.lineWidth=6;c.beginPath();c.arc(s.player.x,s.player.y,42,s.player.angle-.6,s.player.angle+.6);c.stroke();}c.restore();
+ // A subtle edge vignette keeps the street at the centre of attention.
+ const v=c.createRadialGradient(640,340,280,640,340,790);v.addColorStop(0,'#071a2100');v.addColorStop(1,'#071a214f');c.fillStyle=v;c.fillRect(0,0,1280,720);drawHUD(c,s);if(s.paused||!s.started)drawMenu(c,s);
+ };
 }

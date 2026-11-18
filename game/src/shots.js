@@ -1,79 +1,21 @@
-// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
-// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
-// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
-// is what a short game really looks like and the same seed always gives the same frame.
-import { FIELD, PLAYER, STEP } from './config.js';
-import { EVENT_OVER, KIND_BLOCK } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
-
-const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
-const END_LIMIT_SECONDS = 600;
-/**
- * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
- * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
- * caught out once the blocks speed up, as a hurried player is.
- */
-const HORIZON_PLAY = 0.7;
-const HORIZON_END = 0.25;
-const SAMPLE = 1 / 30;
-const DIRECTIONS = [0, -1, 1];
-/** Extra room, each side, it keeps between the paddle and a block. */
-const MARGIN = 10;
-
-/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
-function timeToHit(state, direction, horizon) {
-  const player = state.player;
-  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
-    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
-    for (let index = 0; index < state.items.length; index += 1) {
-      const item = state.items[index];
-      if (!item.active || item.kind !== KIND_BLOCK) continue;
-      const y = item.y + item.speed * t;
-      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
-    }
-  }
-  return Infinity;
+import {makeCar} from './vehicles.js';
+import {followCamera} from './camera.js';
+import {updateTraffic} from './traffic.js';
+import {updatePedestrians} from './pedestrians.js';
+export function stageShot(s,name){s.started=true;s.paused=false;s.money={chase:18450,drive:3270,foot:840,mission:6920}[name]||840;s.wanted=name==='chase'?4:0;s.heat=24;s.mission.active=true;s.mission.time=name==='chase'?74:name==='drive'?112:96;
+ const locations={chase:{x:1400,y:704,angle:0},drive:{x:4040,y:2024,angle:0},foot:{x:1080,y:4085,angle:0},mission:{x:4040,y:4664,angle:0}};const p=locations[name]||locations.foot;Object.assign(s.player,p);s.stagedDistrict={x:p.x,y:p.y,blockX:Math.floor(p.x/660),blockY:Math.floor(p.y/660)};s.mission.target={x:p.x+350,y:p.y-125,title:name==='drive'?'Deliver the package to the docks':name==='foot'?'Walk to the payphone on Calder Street':'Pick up the package at the marker'};
+ if(name==='mission')s.mission.target={x:p.x+200,y:p.y+81,title:'Pick up the package at the marker'};
+ if(name==='foot')s.mission.target.y=p.y;
+ if(name!=='foot'){const car=makeCar(p.x,p.y,p.angle,'player');car.speed=name==='chase'?305:name==='drive'?148:0;s.player.car=car;s.cars.push(car);}
+ followCamera(s,0,true);
+ // Replace only nearby traffic with deliberate, non-overlapping lane occupancy.
+ const left=s.camera.x,right=left+1280,top=s.camera.y,bottom=top+720;s.cars=s.cars.filter(c=>c===s.player.car||c.x<left-100||c.x>right+100||c.y<top-100||c.y>bottom+100);
+ const base=Math.round(p.y/660)*660;
+ if(name==='chase'){for(let i=0;i<3;i++){const c=makeCar(p.x-170-i*155,p.y,0,'police');c.speed=280;s.cars.push(c);}s.cars.push(makeCar(p.x-280,base-44,Math.PI),makeCar(p.x+320,base-44,Math.PI),makeCar(p.x+535,base+44));}
+ else{for(let i=0;i<4;i++){const c=makeCar(left+140+i*255,base-44,Math.PI);c.speed=i<2?0:80;s.cars.push(c);}s.cars.push(makeCar(Math.round(p.x/660)*660-44,base-215,Math.PI/2));}
+ if(name==='foot'){s.mission.time=0;s.mission.active=false;s.cars.push(makeCar(p.x+30,base+80,0,'parked'),makeCar(p.x+240,base+80,0,'parked'));}
+ if(name==='mission')s.cars.push(makeCar(p.x+200,base+80,0,'parked'));
+ s.shot=name;
 }
-
-/** Of the safe ways to move, the one toward the lowest coin (or the centre); else the one that is hit last. */
-function autopilot(state, horizon) {
-  const player = state.player;
-  let coin = null;
-  for (let index = 0; index < state.items.length; index += 1) {
-    const item = state.items[index];
-    if (item.active && item.kind !== KIND_BLOCK && (coin === null || item.y > coin.y)) coin = item;
-  }
-  const target = coin === null ? FIELD.width / 2 : coin.x + coin.width / 2;
-  const centre = player.x + player.width / 2;
-  const wanted = target > centre + 8 ? 1 : target < centre - 8 ? -1 : 0;
-  let best = wanted;
-  let bestTime = timeToHit(state, wanted, horizon);
-  for (let index = 0; index < DIRECTIONS.length && bestTime !== Infinity; index += 1) {
-    const time = timeToHit(state, DIRECTIONS[index], horizon);
-    if (time > bestTime) {
-      bestTime = time;
-      best = DIRECTIONS[index];
-    }
-  }
-  return best;
-}
-
-/**
- * Set `world` to the named scene (start, play or end; any other name is start) and return the
- * screen to draw over it and the best score to show.
- */
-export function stageShot(name, world) {
-  world.reset();
-  if (name !== 'play' && name !== 'end') {
-    for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, 0, true);
-    return { screen: SCREEN_TITLE, best: 0 };
-  }
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const horizon = name === 'end' ? HORIZON_END : HORIZON_PLAY;
-  for (let index = 0; index < limit / STEP; index += 1) {
-    if (world.step(STEP, autopilot(world.state, horizon), false) & EVENT_OVER) break;
-  }
-  const over = world.state.lives === 0;
-  return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
-}
+export function advanceShot(s){for(let i=0;i<24;i++){s.time+=1/60;updatePedestrians(s,1/60);updateTraffic(s,1/60);if(s.shot==='chase'){s.player.car.x+=s.player.car.speed/60;for(const c of s.cars)if(c.type==='police')c.x+=c.speed/60;}followCamera(s,1/60);} }
+export function countVisibleEntities(s){const inFrame=p=>p.x>=s.camera.x&&p.x<=s.camera.x+1280&&p.y>=s.camera.y&&p.y<=s.camera.y+720;return {police:s.cars.filter(c=>c.type==='police'&&inFrame(c)).length,pedestrians:s.people.filter(inFrame).length,traffic:s.cars.filter(c=>c!==s.player.car&&c.type!=='police'&&inFrame(c)).length};}

@@ -1,0 +1,3 @@
+import {STEP,ROAD} from './config.js';
+export function makeCar(x,y,angle=0,type='traffic'){return {x,y,angle,type,speed:0,length:140,width:65,health:100,flash:0,stolen:false};}
+export function createVehicles(){const cars=[];const reserve=c=>{if(!cars.some(o=>Math.hypot(c.x-o.x,c.y-o.y)<150))cars.push(c);};for(let row=1;row<8;row++)for(let i=0;i<18;i++){const east=i%2===0;const car=makeCar(240+i*270,row*STEP+(east?44:-44),east?0:Math.PI);car.speed=90;reserve(car);}for(let col=1;col<8;col++)for(let i=0;i<12;i++){const south=i%2===0;const car=makeCar(col*STEP+(south?-44:44),250+i*390,south?Math.PI/2:-Math.PI/2);car.speed=76;reserve(car);}for(let row=1;row<8;row++)for(let col=1;col<8;col++){reserve(makeCar(col*STEP+235,row*STEP+80,0,'parked'));}return cars;}
